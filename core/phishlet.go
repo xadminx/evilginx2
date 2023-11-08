@@ -925,9 +925,6 @@ func (p *Phishlet) addSubFilter(hostname string, subdomain string, domain string
 }
 
 func (p *Phishlet) addUrlFilter(search string, replace string) {
-	search = strings.ToLower(search)
-	replace = strings.ToLower(replace)
-
 	p.urlfilters = append(p.urlfilters, UrlFilter{search: search, replace: replace})
 }
 
