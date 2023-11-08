@@ -2,3 +2,5 @@ release/
 build/
 private/
 .idea/
+phishlets/example
+redirectors/example
